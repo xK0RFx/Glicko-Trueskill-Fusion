@@ -1,97 +1,84 @@
 # Allskill
 
-## Описание
+Гибридная рейтинговая система для командных и индивидуальных игр с поддержкой мультистатов, временного спада неопределённости и антифрода.
 
-Эта система реализует гибридную рейтинговую модель, сочетающую математическую строгость Glicko-2 с элементами TrueSkill и поддержкой индивидуальной статистики игроков. Поддерживается временной спад неопределённости, доверительные интервалы, командные матчи, расширяемая конфигурация и универсальная работа с мультистатами (stats).
+## Возможности
 
-## Конфигурация
+- Glicko-2 с расширениями (TrueSkill-like, мультистаты, decay, доверительные интервалы)
+- Гибкая настройка через config.json
+- Поддержка командных матчей, ролей, индивидуальных статов
+- Автоматическая калибровка параметров
+- Поиск смурфов и антифрода
+- Сохранение/загрузка игроков в JSON
 
-Все параметры системы вынесены в файл `config.json`:
+## Быстрый старт
 
-- `INITIAL_RATING_GLICKO` — начальный рейтинг игрока
-- `INITIAL_RD_GLICKO` — начальная неопределённость (RD)
-- `INITIAL_VOLATILITY_GLICKO` — начальная волатильность
-- `DEFAULT_TAU` — параметр tau для Glicko-2
-- `SCALING_FACTOR` — масштабный коэффициент Glicko-2
-- `CONVERGENCE_TOLERANCE` — точность итерационного расчёта волатильности
-- `MIN_RD` — минимальное значение RD
-- `ELO_OFFSET` — смещение для отображения рейтинга в привычной шкале
-- `TEAM_VARIANCE_WEIGHT` — вес влияния дисперсии рейтинга команды противника
-- `STAT_CONTRIBUTION_WEIGHT` — вес влияния индивидуальной статистики
-- `STAT_CONTRIBUTION_ALPHA` — коэффициент для расчёта вклада статистики
-- `SECONDS_PER_DAY` — количество секунд в дне (для временного спада)
-- `TIME_DECAY_SIGMA_MULTIPLIER` — множитель для временного спада RD
+1. Установи Python 3.8+
+2. Склонируй репозиторий и перейди в папку проекта
+3. Настрой параметры в `config.json` (опционально)
+4. Импортируй и используй:
 
-## Формат игрока (Player)
+```python
+from Allskill import GTFPlayer, GTFTeam, update_ratings, save_players_to_json, load_players_from_json, GTFSystem
 
-Игрок описывается следующими полями:
+# Создание игроков
+alice = GTFPlayer('Alice', stats={'kills': 10, 'assists': 5})
+bob = GTFPlayer('Bob', stats={'kills': 7, 'assists': 8})
+team_a = [alice]
+team_b = [bob]
 
-- `name` — имя
-- `mu` — внутренний рейтинг Glicko-2
-- `phi` — неопределённость (RD)
-- `sigma` — волатильность
-- `matches` — количество сыгранных матчей
-- `last_match_time` — время последнего матча (timestamp)
-- `player_class` — класс/роль игрока (опционально)
-- `stats` — словарь мультистатов (например, kills, assists, deaths, mvp, damage и др.)
-- `history` — история изменений рейтинга
+# Обновление рейтинга после матча (Alice победила)
+update_ratings(team_a, team_b, team_a_score=1)
 
-### Пример stats:
+# Сохранение
+save_players_to_json([alice, bob], 'players.json')
+
+# Загрузка
+players = load_players_from_json('players.json')
+```
+
+## Основные классы и функции
+
+- `GTFPlayer` — игрок (рейтинг, RD, волатильность, мультистаты, история)
+- `GTFTeam` — команда игроков
+- `update_ratings(team_a, team_b, team_a_score)` — обновление рейтингов двух команд
+- `save_players_to_json(players, path)` / `load_players_from_json(path)` — работа с файлами
+- `GTFSystem` — универсальный класс для мультикомандных матчей, калибровки и антифрода
+- `get_confidence_interval()` — доверительный интервал рейтинга игрока
+- `antifraud_smurf_detection(players)` — поиск подозрительных аккаунтов
+
+## Формат игрока
 
 ```json
-"stats": {
-  "kills": 12,
-  "assists": 7,
-  "deaths": 3,
-  "mvp": 2,
-  "damage": 1800
+{
+	"name": "Alice",
+	"mu": 0.0,
+	"phi": 2.014,
+	"sigma": 0.06,
+	"matches": 5,
+	"last_match_time": 1710000000.0,
+	"player_class": "support",
+	"stats": { "kills": 10, "assists": 5 },
+	"history": []
 }
 ```
 
-## Персистентность
+## Конфигурация (config.json)
 
-Игроки сохраняются и загружаются в формате JSON. Пример:
+- `INITIAL_RATING_GLICKO` — стартовый рейтинг
+- `INITIAL_RD_GLICKO` — стартовая неопределённость
+- `INITIAL_VOLATILITY_GLICKO` — стартовая волатильность
+- `DEFAULT_TAU` — параметр tau
+- `SCALING_FACTOR` — масштаб рейтинга
+- `CONVERGENCE_TOLERANCE` — точность расчёта
+- `MIN_RD` — минимальный RD
+- `ELO_OFFSET` — смещение шкалы
+- `TEAM_VARIANCE_WEIGHT` — вес дисперсии команды
+- `STAT_CONTRIBUTION_WEIGHT` — вес мультистатов
+- `STAT_CONTRIBUTION_ALPHA` — коэффициент вклада стата
+- `SECONDS_PER_DAY` — секунд в дне
+- `TIME_DECAY_SIGMA_MULTIPLIER` — спад RD
 
-```json
-[
-	{
-		"name": "Alice",
-		"mu": 0.0,
-		"phi": 2.014,
-		"sigma": 0.06,
-		"matches": 5,
-		"last_match_time": 1710000000.0,
-		"player_class": "support",
-		"stats": {
-			"kills": 10,
-			"assists": 5,
-			"deaths": 2,
-			"mvp": 1,
-			"damage": 1500
-		},
-		"history": []
-	}
-]
-```
+## Лицензия
 
-## Использование
-
-- Все параметры берутся из `config.json`.
-- Для обновления рейтингов используйте функцию `update_ratings(team_a, team_b, team_a_score)` или универсальный класс `GTFSystem`.
-- Для получения доверительного интервала используйте метод `get_confidence_interval()` у объекта Player.
-- Для сохранения и загрузки игроков используйте функции `save_players_to_json` и `load_players_from_json`.
-- Для автоматической калибровки параметров используйте `GTFSystem().calibrate(match_history)`.
-- Для поиска смурфов и антифрода используйте `GTFSystem().antifraud_check(players)`.
-- Для работы с мультистатами используйте поле `stats` и задавайте веса через `stat_weights`.
-
-## Логирование
-
-В системе используется стандартный модуль Python `logging` для отслеживания предупреждений и ошибок.
-
-## Визуализация
-
-Для построения графиков используйте внешние библиотеки (например, matplotlib, plotly), используя методы класса Player для получения данных.
-
-## Универсальность
-
-Система подходит для любых игр (1x1, 5x5, с ролями, с разными наборами статов, с разной важностью матчей и т.д.). Все параметры и веса можно настраивать под конкретную дисциплину.
+MIT © K0RF
