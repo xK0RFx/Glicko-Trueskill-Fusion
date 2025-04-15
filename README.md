@@ -1,4 +1,4 @@
-# Glicko-Trueskill Fusion
+# Allskill
 
 ## Описание
 

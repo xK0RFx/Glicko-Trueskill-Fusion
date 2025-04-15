@@ -11,12 +11,5 @@
 	"STAT_CONTRIBUTION_WEIGHT": 0.1,
 	"STAT_CONTRIBUTION_ALPHA": 0.5,
 	"SECONDS_PER_DAY": 86400,
-	"TIME_DECAY_SIGMA_MULTIPLIER": 1.0,
-	"STAT_WEIGHTS": {
-		"kills": 1.0,
-		"assists": 0.5,
-		"deaths": -0.7,
-		"mvp": 2.0,
-		"damage": 0.001
-	}
+	"TIME_DECAY_SIGMA_MULTIPLIER": 1.0
 }

@@ -33,19 +33,11 @@ STAT_CONTRIBUTION_ALPHA = config.get('STAT_CONTRIBUTION_ALPHA', 0.5)
 SECONDS_PER_DAY = config.get('SECONDS_PER_DAY', 86400)
 TIME_DECAY_SIGMA_MULTIPLIER = config.get('TIME_DECAY_SIGMA_MULTIPLIER', 1.0)
 
-DEFAULT_STAT_WEIGHTS = {
-    'kills': 1.0,
-    'assists': 0.5,
-    'deaths': -0.7,
-    'mvp': 2.0,
-    'damage': 0.001
-}
-
 def aggregate_stats(stats, stat_weights=None):
     if not stats:
         return 0
     if stat_weights is None:
-        stat_weights = DEFAULT_STAT_WEIGHTS
+        return sum(stats.values())
     total = 0
     for k, v in stats.items():
         w = stat_weights.get(k, 0)
@@ -266,7 +258,7 @@ def calculate_contribution_factor(player_stat, team_avg_stat, opp_avg_stat=None)
         contribution += 0.5 * STAT_CONTRIBUTION_ALPHA * opp_diff
     return contribution
 
-def update_player_rating(player, avg_team_stat, opp_avg_stat, opponent_avg_mu, opponent_avg_phi, opponent_mu_variance, outcome, match_importance=1.0):
+def update_player_rating(player, avg_team_stat, opp_avg_stat, opponent_avg_mu, opponent_avg_phi, opponent_mu_variance, outcome, match_importance=1.0, stat_weights=None):
     player._pre_rating_rd_update()
     variance_effect = opponent_mu_variance * (SCALING_FACTOR**2)
     if variance_effect < 0: variance_effect = 0
@@ -277,8 +269,7 @@ def update_player_rating(player, avg_team_stat, opp_avg_stat, opponent_avg_mu, o
     E_val = _E(player.mu, opponent_avg_mu, effective_opponent_phi)
     v_val = _v(player.mu, opponent_avg_mu, effective_opponent_phi)
     delta_val = _delta(player.mu, opponent_avg_mu, effective_opponent_phi, v_val, outcome)
-    # Универсальный stat: агрегируем все метрики
-    player_stat = aggregate_stats(player.stats)
+    player_stat = aggregate_stats(player.stats, stat_weights)
     avg_team_stat = avg_team_stat
     opp_avg_stat = opp_avg_stat
     contribution_factor = calculate_contribution_factor(player_stat, avg_team_stat, opp_avg_stat)
@@ -296,7 +287,7 @@ def update_player_rating(player, avg_team_stat, opp_avg_stat, opponent_avg_mu, o
     player.matches += 1
     player.last_match_time = time.time()
 
-def update_ratings(team_a, team_b, team_a_score):
+def update_ratings(team_a, team_b, team_a_score, stat_weights=None):
     if not team_a or not team_b:
         logger.warning("One or both teams are empty.")
         return
@@ -304,8 +295,8 @@ def update_ratings(team_a, team_b, team_a_score):
         logger.error("team_a_score должен быть 0, 0.5 или 1")
         raise ValueError("team_a_score должен быть 0, 0.5 или 1")
     team_b_score = 1.0 - team_a_score
-    team_a_stats = [aggregate_stats(p.stats) for p in team_a]
-    team_b_stats = [aggregate_stats(p.stats) for p in team_b]
+    team_a_stats = [aggregate_stats(p.stats, stat_weights) for p in team_a]
+    team_b_stats = [aggregate_stats(p.stats, stat_weights) for p in team_b]
     avg_stat_a = statistics.mean(team_a_stats) if team_a_stats else 0
     avg_stat_b = statistics.mean(team_b_stats) if team_b_stats else 0
     team_a_mus = [p.mu for p in team_a]
@@ -316,12 +307,12 @@ def update_ratings(team_a, team_b, team_a_score):
     avg_mu_b = statistics.mean(team_b_mus) if team_b_mus else 0
     mu_variance_b = statistics.variance(team_b_mus) if len(team_b_mus) > 1 else 0
     avg_phi_b = math.sqrt(sum(p.phi**2 for p in team_b) / len(team_b)) if team_b else 0
-    initial_state_a = [(p.mu, p.phi, p.sigma, aggregate_stats(p.stats)) for p in team_a]
-    initial_state_b = [(p.mu, p.phi, p.sigma, aggregate_stats(p.stats)) for p in team_b]
+    initial_state_a = [(p.mu, p.phi, p.sigma, aggregate_stats(p.stats, stat_weights)) for p in team_a]
+    initial_state_b = [(p.mu, p.phi, p.sigma, aggregate_stats(p.stats, stat_weights)) for p in team_b]
     for i, player in enumerate(team_a):
-        update_player_rating(player, avg_stat_a, avg_stat_b, avg_mu_b, avg_phi_b, mu_variance_b, team_a_score)
+        update_player_rating(player, avg_stat_a, avg_stat_b, avg_mu_b, avg_phi_b, mu_variance_b, team_a_score, stat_weights=stat_weights)
     for i, player in enumerate(team_b):
-        update_player_rating(player, avg_stat_b, avg_stat_a, avg_mu_a, avg_phi_a, mu_variance_a, team_b_score)
+        update_player_rating(player, avg_stat_b, avg_stat_a, avg_mu_a, avg_phi_a, mu_variance_a, team_b_score, stat_weights=stat_weights)
 
 def antifraud_smurf_detection(players, min_matches=10, rating_growth_threshold=400, rd_threshold=80):
     suspects = []
@@ -368,12 +359,10 @@ def calibrate_parameters(match_history, param_grid=None):
             ranks = match['ranks']
             stats = match.get('stats', None)
             match_importance = match.get('importance', 1.0)
-            # Копируем игроков чтобы не портить оригинал
             teams_copy = [[GTFPlayer.from_dict(p.to_dict()) for p in team] for team in teams]
             gtf_teams = [GTFTeam(team) for team in teams_copy]
             system = GTFSystem()
             system.update_ratings(gtf_teams, ranks, stats=stats, match_importance=match_importance)
-            # Предсказание: разница средних рейтингов команд
             pred = gtf_teams[0].get_ratings()[0] - gtf_teams[1].get_ratings()[0] if len(gtf_teams) == 2 else 0
             preds.append(pred)
             reals.append(match.get('real_result', 0))
@@ -396,7 +385,6 @@ class GTFSystem:
             avg_mus.append(statistics.mean(mus) if mus else 0)
             mu_vars.append(statistics.variance(mus) if len(mus) > 1 else 0)
             avg_phis.append(math.sqrt(sum(p.phi**2 for p in team.players) / len(team.players)) if team.players else 0)
-            # Универсальный stat: агрегируем все метрики
             team_stats = [aggregate_stats(p.stats, stat_weights) for p in team.players]
             avg_stats.append(statistics.mean(team_stats) if team_stats else 0)
         for i, team in enumerate(teams):
@@ -406,7 +394,7 @@ class GTFSystem:
                 opp_avg_phi = statistics.mean([avg_phis[j] for j in range(n) if j != i]) if n > 1 else avg_phis[i]
                 opp_avg_stat = statistics.mean([avg_stats[j] for j in range(n) if j != i]) if n > 1 else avg_stats[i]
                 outcome = 1.0 - (ranks[i] / (n - 1)) if n > 1 else 1.0
-                update_player_rating(player, avg_stats[i], opp_avg_stat, opp_avg_mu, opp_avg_phi, opp_mu_var, outcome, match_importance)
+                update_player_rating(player, avg_stats[i], opp_avg_stat, opp_avg_mu, opp_avg_phi, opp_mu_var, outcome, match_importance, stat_weights=stat_weights)
                 player.history.append({'mu': player.mu, 'phi': player.phi, 'sigma': player.sigma})
 
     def save_players(self, players, path):
