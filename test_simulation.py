@@ -1,6 +1,6 @@
 import random
 import time
-from Glicko_Trueskill_Fusion import Player, update_ratings
+from Allskill import Player, update_ratings
 import json
 
 def смоделировать_матч(команда_a, команда_b):

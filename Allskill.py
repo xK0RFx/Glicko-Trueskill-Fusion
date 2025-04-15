@@ -32,8 +32,8 @@ STAT_CONTRIBUTION_ALPHA = config.get('STAT_CONTRIBUTION_ALPHA', 0.5)
 SECONDS_PER_DAY = config.get('SECONDS_PER_DAY', 86400)
 TIME_DECAY_SIGMA_MULTIPLIER = config.get('TIME_DECAY_SIGMA_MULTIPLIER', 1.0)
 
-class Player:
-    def __init__(self, name, rating=INITIAL_RATING_GLICKO, rd=INITIAL_RD_GLICKO, vol=INITIAL_VOLATILITY_GLICKO, stat=0, matches=0, last_match_time=None):
+class GTFPlayer:
+    def __init__(self, name, rating=INITIAL_RATING_GLICKO, rd=INITIAL_RD_GLICKO, vol=INITIAL_VOLATILITY_GLICKO, stat=0, matches=0, last_match_time=None, player_class=None):
         self.name = name
         self.mu = (rating - ELO_OFFSET) / SCALING_FACTOR
         self.phi = rd / SCALING_FACTOR
@@ -41,6 +41,8 @@ class Player:
         self.stat = stat
         self.matches = matches
         self.last_match_time = last_match_time if last_match_time is not None else time.time()
+        self.player_class = player_class
+        self.history = []
 
     def get_rating(self):
         return self.mu * SCALING_FACTOR + ELO_OFFSET
@@ -88,20 +90,42 @@ class Player:
             'sigma': self.sigma,
             'stat': self.stat,
             'matches': self.matches,
-            'last_match_time': self.last_match_time
+            'last_match_time': self.last_match_time,
+            'player_class': self.player_class,
+            'history': self.history
         }
 
     @staticmethod
     def from_dict(d):
-        return Player(
+        p = GTFPlayer(
             name=d['name'],
             rating=d.get('mu', 0) * SCALING_FACTOR + ELO_OFFSET if 'mu' in d else d.get('rating', INITIAL_RATING_GLICKO),
             rd=d.get('phi', 2.014) * SCALING_FACTOR if 'phi' in d else d.get('rd', INITIAL_RD_GLICKO),
             vol=d.get('sigma', INITIAL_VOLATILITY_GLICKO),
             stat=d.get('stat', 0),
             matches=d.get('matches', 0),
-            last_match_time=d.get('last_match_time', None)
+            last_match_time=d.get('last_match_time', None),
+            player_class=d.get('player_class', None)
         )
+        p.history = d.get('history', [])
+        return p
+
+class GTFTeam:
+    def __init__(self, players):
+        self.players = players
+
+    def get_ratings(self):
+        return [p.get_rating() for p in self.players]
+
+    def get_stats(self):
+        return [p.stat for p in self.players]
+
+    def to_dict(self):
+        return [p.to_dict() for p in self.players]
+
+    @staticmethod
+    def from_dict(lst):
+        return GTFTeam([GTFPlayer.from_dict(d) for d in lst])
 
 def save_players_to_json(players, path):
     try:
@@ -115,7 +139,7 @@ def load_players_from_json(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        players = [Player.from_dict(d) for d in data]
+        players = [GTFPlayer.from_dict(d) for d in data]
         logger.info(f'Loaded {len(players)} players from {path}')
         return players
     except Exception as e:
@@ -206,17 +230,20 @@ def _compute_new_volatility(phi, v, delta, sigma, tau):
         return sigma
     return math.exp(A / 2)
 
-def calculate_contribution_factor(player_stat, team_avg_stat):
+def calculate_contribution_factor(player_stat, team_avg_stat, opp_avg_stat=None):
     if abs(team_avg_stat) < 1e-6:
         return 0
     try:
-      relative_diff = (player_stat - team_avg_stat) / team_avg_stat
+        relative_diff = (player_stat - team_avg_stat) / team_avg_stat
     except ZeroDivisionError:
-      return 0
+        return 0
     contribution = max(-0.5, min(0.5, relative_diff)) * STAT_CONTRIBUTION_ALPHA
+    if opp_avg_stat is not None and abs(opp_avg_stat) > 1e-6:
+        opp_diff = (player_stat - opp_avg_stat) / (opp_avg_stat + 1e-6)
+        contribution += 0.5 * STAT_CONTRIBUTION_ALPHA * opp_diff
     return contribution
 
-def update_player_rating(player, avg_team_stat, opponent_avg_mu, opponent_avg_phi, opponent_mu_variance, outcome):
+def update_player_rating(player, avg_team_stat, opp_avg_stat, opponent_avg_mu, opponent_avg_phi, opponent_mu_variance, outcome, match_importance=1.0):
     player._pre_rating_rd_update()
     variance_effect = opponent_mu_variance * (SCALING_FACTOR**2)
     if variance_effect < 0: variance_effect = 0
@@ -227,8 +254,8 @@ def update_player_rating(player, avg_team_stat, opponent_avg_mu, opponent_avg_ph
     E_val = _E(player.mu, opponent_avg_mu, effective_opponent_phi)
     v_val = _v(player.mu, opponent_avg_mu, effective_opponent_phi)
     delta_val = _delta(player.mu, opponent_avg_mu, effective_opponent_phi, v_val, outcome)
-    contribution_factor = calculate_contribution_factor(player.stat, avg_team_stat)
-    delta_multiplier = 1.0 + STAT_CONTRIBUTION_WEIGHT * contribution_factor
+    contribution_factor = calculate_contribution_factor(player.stat, avg_team_stat, opp_avg_stat)
+    delta_multiplier = 1.0 + STAT_CONTRIBUTION_WEIGHT * contribution_factor * match_importance
     new_sigma = _compute_new_volatility(player.phi, v_val, delta_val, player.sigma, DEFAULT_TAU)
     phi_star = math.sqrt(player.phi**2 + new_sigma**2)
     v_inv = 1 / v_val if abs(v_val) > 1e-12 else 1e12
@@ -263,6 +290,77 @@ def update_ratings(team_a, team_b, team_a_score):
     initial_state_a = [(p.mu, p.phi, p.sigma, p.stat) for p in team_a]
     initial_state_b = [(p.mu, p.phi, p.sigma, p.stat) for p in team_b]
     for i, player in enumerate(team_a):
-        update_player_rating(player, avg_stat_a, avg_mu_b, avg_phi_b, mu_variance_b, team_a_score)
+        update_player_rating(player, avg_stat_a, avg_stat_b, avg_mu_b, avg_phi_b, mu_variance_b, team_a_score)
     for i, player in enumerate(team_b):
-        update_player_rating(player, avg_stat_b, avg_mu_a, avg_phi_a, mu_variance_a, team_b_score)
+        update_player_rating(player, avg_stat_b, avg_stat_a, avg_mu_a, avg_phi_a, mu_variance_a, team_b_score)
+
+def antifraud_smurf_detection(players, min_matches=10, rating_growth_threshold=400, rd_threshold=80):
+    suspects = []
+    for p in players:
+        if p.matches < min_matches:
+            continue
+        if not p.history or len(p.history) < min_matches:
+            continue
+        start_rating = p.history[0]['mu'] * SCALING_FACTOR + ELO_OFFSET if 'mu' in p.history[0] else p.get_rating()
+        end_rating = p.get_rating()
+        growth = end_rating - start_rating
+        rd = p.get_rd() if hasattr(p, 'get_rd') else 0
+        if growth > rating_growth_threshold and rd < rd_threshold:
+            suspects.append({
+                'name': p.name,
+                'growth': growth,
+                'matches': p.matches,
+                'rd': rd,
+                'start_rating': start_rating,
+                'end_rating': end_rating
+            })
+    return suspects
+
+class GTFSystem:
+    def update_ratings(self, teams, ranks, stats=None, stat_weight=0.0, match_importance=1.0):
+        n = len(teams)
+        avg_mus = []
+        mu_vars = []
+        avg_phis = []
+        avg_stats = []
+        for team in teams:
+            mus = [p.mu for p in team.players]
+            avg_mus.append(statistics.mean(mus) if mus else 0)
+            mu_vars.append(statistics.variance(mus) if len(mus) > 1 else 0)
+            avg_phis.append(math.sqrt(sum(p.phi**2 for p in team.players) / len(team.players)) if team.players else 0)
+            avg_stats.append(statistics.mean(p.stat for p in team.players) if team.players else 0)
+        for i, team in enumerate(teams):
+            for player in team.players:
+                opp_avg_mu = statistics.mean([avg_mus[j] for j in range(n) if j != i]) if n > 1 else avg_mus[i]
+                opp_mu_var = statistics.mean([mu_vars[j] for j in range(n) if j != i]) if n > 1 else mu_vars[i]
+                opp_avg_phi = statistics.mean([avg_phis[j] for j in range(n) if j != i]) if n > 1 else avg_phis[i]
+                opp_avg_stat = statistics.mean([avg_stats[j] for j in range(n) if j != i]) if n > 1 else avg_stats[i]
+                outcome = 1.0 - (ranks[i] / (n - 1)) if n > 1 else 1.0
+                update_player_rating(player, avg_stats[i], opp_avg_stat, opp_avg_mu, opp_avg_phi, opp_mu_var, outcome, match_importance)
+                player.history.append({'mu': player.mu, 'phi': player.phi, 'sigma': player.sigma})
+
+    def save_players(self, players, path):
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump([p.to_dict() for p in players], f, ensure_ascii=False, indent=2)
+
+    def load_players(self, path):
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return [GTFPlayer.from_dict(d) for d in data]
+
+    def export_history(self, players, path):
+        history = {p.name: p.history for p in players}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+
+    def calibrate(self, match_history):
+        pass
+
+    def antifraud_check(self, players):
+        return antifraud_smurf_detection(players)
+
+# Пример использования:
+# gtf = GTFSystem()
+# suspects = gtf.antifraud_check(players)
+# for s in suspects:
+#     print(f"Возможный смурф: {s['name']} | Рост рейтинга: {s['growth']:.1f} | Матчей: {s['matches']} | RD: {s['rd']:.1f}")
