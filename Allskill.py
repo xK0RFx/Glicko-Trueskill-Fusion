@@ -4,6 +4,7 @@ import statistics
 import json
 import logging
 import os
+import itertools
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,13 +33,33 @@ STAT_CONTRIBUTION_ALPHA = config.get('STAT_CONTRIBUTION_ALPHA', 0.5)
 SECONDS_PER_DAY = config.get('SECONDS_PER_DAY', 86400)
 TIME_DECAY_SIGMA_MULTIPLIER = config.get('TIME_DECAY_SIGMA_MULTIPLIER', 1.0)
 
+DEFAULT_STAT_WEIGHTS = {
+    'kills': 1.0,
+    'assists': 0.5,
+    'deaths': -0.7,
+    'mvp': 2.0,
+    'damage': 0.001
+}
+
+def aggregate_stats(stats, stat_weights=None):
+    if not stats:
+        return 0
+    if stat_weights is None:
+        stat_weights = DEFAULT_STAT_WEIGHTS
+    total = 0
+    for k, v in stats.items():
+        w = stat_weights.get(k, 0)
+        total += w * v
+    return total
+
 class GTFPlayer:
-    def __init__(self, name, rating=INITIAL_RATING_GLICKO, rd=INITIAL_RD_GLICKO, vol=INITIAL_VOLATILITY_GLICKO, stat=0, matches=0, last_match_time=None, player_class=None):
+    def __init__(self, name, rating=INITIAL_RATING_GLICKO, rd=INITIAL_RD_GLICKO, vol=INITIAL_VOLATILITY_GLICKO, stat=0, matches=0, last_match_time=None, player_class=None, stats=None):
         self.name = name
         self.mu = (rating - ELO_OFFSET) / SCALING_FACTOR
         self.phi = rd / SCALING_FACTOR
         self.sigma = vol
         self.stat = stat
+        self.stats = stats if stats is not None else {}
         self.matches = matches
         self.last_match_time = last_match_time if last_match_time is not None else time.time()
         self.player_class = player_class
@@ -65,7 +86,7 @@ class GTFPlayer:
         vol = self.get_volatility()
         conf_interval = self.get_confidence_interval()
         return (f"{self.name}: Rating={rating:.2f} (±{rd:.1f}, 95% CI [{conf_interval[0]:.1f}, {conf_interval[1]:.1f}]), "
-                f"Volatility={vol:.4f}, Stat={self.stat}, Matches={self.matches}")
+                f"Volatility={vol:.4f}, Stat={self.stat}, Matches={self.matches}, Stats={self.stats}")
 
     def _pre_rating_rd_update(self):
         time_now = time.time()
@@ -89,6 +110,7 @@ class GTFPlayer:
             'phi': self.phi,
             'sigma': self.sigma,
             'stat': self.stat,
+            'stats': self.stats,
             'matches': self.matches,
             'last_match_time': self.last_match_time,
             'player_class': self.player_class,
@@ -105,7 +127,8 @@ class GTFPlayer:
             stat=d.get('stat', 0),
             matches=d.get('matches', 0),
             last_match_time=d.get('last_match_time', None),
-            player_class=d.get('player_class', None)
+            player_class=d.get('player_class', None),
+            stats=d.get('stats', {})
         )
         p.history = d.get('history', [])
         return p
@@ -117,8 +140,8 @@ class GTFTeam:
     def get_ratings(self):
         return [p.get_rating() for p in self.players]
 
-    def get_stats(self):
-        return [p.stat for p in self.players]
+    def get_stats(self, stat_weights=None):
+        return [aggregate_stats(p.stats, stat_weights) for p in self.players]
 
     def to_dict(self):
         return [p.to_dict() for p in self.players]
@@ -254,7 +277,11 @@ def update_player_rating(player, avg_team_stat, opp_avg_stat, opponent_avg_mu, o
     E_val = _E(player.mu, opponent_avg_mu, effective_opponent_phi)
     v_val = _v(player.mu, opponent_avg_mu, effective_opponent_phi)
     delta_val = _delta(player.mu, opponent_avg_mu, effective_opponent_phi, v_val, outcome)
-    contribution_factor = calculate_contribution_factor(player.stat, avg_team_stat, opp_avg_stat)
+    # Универсальный stat: агрегируем все метрики
+    player_stat = aggregate_stats(player.stats)
+    avg_team_stat = avg_team_stat
+    opp_avg_stat = opp_avg_stat
+    contribution_factor = calculate_contribution_factor(player_stat, avg_team_stat, opp_avg_stat)
     delta_multiplier = 1.0 + STAT_CONTRIBUTION_WEIGHT * contribution_factor * match_importance
     new_sigma = _compute_new_volatility(player.phi, v_val, delta_val, player.sigma, DEFAULT_TAU)
     phi_star = math.sqrt(player.phi**2 + new_sigma**2)
@@ -277,18 +304,20 @@ def update_ratings(team_a, team_b, team_a_score):
         logger.error("team_a_score должен быть 0, 0.5 или 1")
         raise ValueError("team_a_score должен быть 0, 0.5 или 1")
     team_b_score = 1.0 - team_a_score
+    team_a_stats = [aggregate_stats(p.stats) for p in team_a]
+    team_b_stats = [aggregate_stats(p.stats) for p in team_b]
+    avg_stat_a = statistics.mean(team_a_stats) if team_a_stats else 0
+    avg_stat_b = statistics.mean(team_b_stats) if team_b_stats else 0
     team_a_mus = [p.mu for p in team_a]
     avg_mu_a = statistics.mean(team_a_mus) if team_a_mus else 0
     mu_variance_a = statistics.variance(team_a_mus) if len(team_a_mus) > 1 else 0
     avg_phi_a = math.sqrt(sum(p.phi**2 for p in team_a) / len(team_a)) if team_a else 0
-    avg_stat_a = statistics.mean(p.stat for p in team_a) if team_a else 0
     team_b_mus = [p.mu for p in team_b]
     avg_mu_b = statistics.mean(team_b_mus) if team_b_mus else 0
     mu_variance_b = statistics.variance(team_b_mus) if len(team_b_mus) > 1 else 0
     avg_phi_b = math.sqrt(sum(p.phi**2 for p in team_b) / len(team_b)) if team_b else 0
-    avg_stat_b = statistics.mean(p.stat for p in team_b) if team_b else 0
-    initial_state_a = [(p.mu, p.phi, p.sigma, p.stat) for p in team_a]
-    initial_state_b = [(p.mu, p.phi, p.sigma, p.stat) for p in team_b]
+    initial_state_a = [(p.mu, p.phi, p.sigma, aggregate_stats(p.stats)) for p in team_a]
+    initial_state_b = [(p.mu, p.phi, p.sigma, aggregate_stats(p.stats)) for p in team_b]
     for i, player in enumerate(team_a):
         update_player_rating(player, avg_stat_a, avg_stat_b, avg_mu_b, avg_phi_b, mu_variance_b, team_a_score)
     for i, player in enumerate(team_b):
@@ -316,8 +345,47 @@ def antifraud_smurf_detection(players, min_matches=10, rating_growth_threshold=4
             })
     return suspects
 
+def calibrate_parameters(match_history, param_grid=None):
+    if param_grid is None:
+        param_grid = {
+            'STAT_CONTRIBUTION_WEIGHT': [0.05, 0.1, 0.2, 0.3],
+            'TEAM_VARIANCE_WEIGHT': [0.05, 0.1, 0.2],
+            'DEFAULT_TAU': [0.3, 0.5, 0.7]
+        }
+    best_params = None
+    best_rmse = float('inf')
+    param_names = list(param_grid.keys())
+    for values in itertools.product(*[param_grid[k] for k in param_names]):
+        params = dict(zip(param_names, values))
+        global STAT_CONTRIBUTION_WEIGHT, TEAM_VARIANCE_WEIGHT, DEFAULT_TAU
+        STAT_CONTRIBUTION_WEIGHT = params['STAT_CONTRIBUTION_WEIGHT']
+        TEAM_VARIANCE_WEIGHT = params['TEAM_VARIANCE_WEIGHT']
+        DEFAULT_TAU = params['DEFAULT_TAU']
+        preds = []
+        reals = []
+        for match in match_history:
+            teams = match['teams']
+            ranks = match['ranks']
+            stats = match.get('stats', None)
+            match_importance = match.get('importance', 1.0)
+            # Копируем игроков чтобы не портить оригинал
+            teams_copy = [[GTFPlayer.from_dict(p.to_dict()) for p in team] for team in teams]
+            gtf_teams = [GTFTeam(team) for team in teams_copy]
+            system = GTFSystem()
+            system.update_ratings(gtf_teams, ranks, stats=stats, match_importance=match_importance)
+            # Предсказание: разница средних рейтингов команд
+            pred = gtf_teams[0].get_ratings()[0] - gtf_teams[1].get_ratings()[0] if len(gtf_teams) == 2 else 0
+            preds.append(pred)
+            reals.append(match.get('real_result', 0))
+        mse = sum((p - r) ** 2 for p, r in zip(preds, reals)) / len(preds)
+        rmse = mse ** 0.5
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_params = params.copy()
+    return best_params, best_rmse
+
 class GTFSystem:
-    def update_ratings(self, teams, ranks, stats=None, stat_weight=0.0, match_importance=1.0):
+    def update_ratings(self, teams, ranks, stats=None, stat_weights=None, match_importance=1.0):
         n = len(teams)
         avg_mus = []
         mu_vars = []
@@ -328,7 +396,9 @@ class GTFSystem:
             avg_mus.append(statistics.mean(mus) if mus else 0)
             mu_vars.append(statistics.variance(mus) if len(mus) > 1 else 0)
             avg_phis.append(math.sqrt(sum(p.phi**2 for p in team.players) / len(team.players)) if team.players else 0)
-            avg_stats.append(statistics.mean(p.stat for p in team.players) if team.players else 0)
+            # Универсальный stat: агрегируем все метрики
+            team_stats = [aggregate_stats(p.stats, stat_weights) for p in team.players]
+            avg_stats.append(statistics.mean(team_stats) if team_stats else 0)
         for i, team in enumerate(teams):
             for player in team.players:
                 opp_avg_mu = statistics.mean([avg_mus[j] for j in range(n) if j != i]) if n > 1 else avg_mus[i]
@@ -354,13 +424,7 @@ class GTFSystem:
             json.dump(history, f, ensure_ascii=False, indent=2)
 
     def calibrate(self, match_history):
-        pass
+        return calibrate_parameters(match_history)
 
     def antifraud_check(self, players):
         return antifraud_smurf_detection(players)
-
-# Пример использования:
-# gtf = GTFSystem()
-# suspects = gtf.antifraud_check(players)
-# for s in suspects:
-#     print(f"Возможный смурф: {s['name']} | Рост рейтинга: {s['growth']:.1f} | Матчей: {s['matches']} | RD: {s['rd']:.1f}")
