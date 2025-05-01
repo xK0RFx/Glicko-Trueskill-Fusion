@@ -2,9 +2,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-from Allskill import GTFPlayer, update_ratings, save_players_to_json, load_players_from_json, antifraud_smurf_detection
+from src.system import GTFSystem
+from src.models import GTFPlayer
 import os
 
+system = GTFSystem()
 app = FastAPI(title='Allskill API', description='Открытая рейтинговая система с мультистатами и антифродом', version='1.0')
 app.add_middleware(
     CORSMiddleware,
@@ -39,10 +41,10 @@ class MatchIn(BaseModel):
 async def get_all_players():
     if not os.path.exists(PLAYERS_PATH):
         return []
-    return load_players_from_json(PLAYERS_PATH)
+    return system.load_players(PLAYERS_PATH)
 
 async def save_all_players(players):
-    save_players_to_json(players, PLAYERS_PATH)
+    system.save_players(players, PLAYERS_PATH)
 
 @app.get('/players', response_model=List[PlayerOut], summary='Получить всех игроков')
 async def get_players():
@@ -74,12 +76,15 @@ async def play_match(match: MatchIn):
     team_b = [p for p in players if p.name in match.team_b]
     if len(team_a) != len(match.team_a) or len(team_b) != len(match.team_b):
         raise HTTPException(400, 'Некорректные имена игроков')
-    update_ratings(team_a, team_b, match.team_a_score)
+    # Convert score to ranks
+    rank_a = 1.0 - match.team_a_score
+    rank_b = match.team_a_score
+    system.update_ratings([team_a, team_b], [rank_a, rank_b])
     await save_all_players(players)
     return {'team_a': [p.to_dict() for p in team_a], 'team_b': [p.to_dict() for p in team_b]}
 
 @app.get('/antifraud', summary='Проверить игроков на смурфинг/антифрод')
 async def antifraud():
     players = await get_all_players()
-    suspects = antifraud_smurf_detection(players)
+    suspects = system.antifraud_check(players)
     return suspects 
