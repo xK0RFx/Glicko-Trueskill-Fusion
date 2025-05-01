@@ -9,17 +9,17 @@ from src.system import GTFSystem
 
 
 def antifraud_smurf_detection(players, min_matches=10, rating_growth_threshold=400, rd_threshold=80):
-    """Обнаруживает игроков-смурфов на основе роста рейтинга и низкого RD."""
+    """Detect smurf accounts based on rating growth and low RD."""
     suspects = []
     for p in players:
         if p.matches < min_matches:
             continue
         if not p.history or len(p.history) < min_matches:
             continue
-        # Начальный рейтинг
+        # Initial rating from history
         start_mu = p.history[0].get('mu', p.mu)
         start_rating = start_mu * p.history[0].get('sigma', 1)**0 + 0  # placeholder for offset
-        # Фактический рейтинг
+        # Current rating
         end_rating = p.get_rating()
         growth = end_rating - start_rating
         rd = p.get_rd()
@@ -36,7 +36,7 @@ def antifraud_smurf_detection(players, min_matches=10, rating_growth_threshold=4
 
 
 def calibrate_parameters(match_history, param_grid=None):
-    """Перебирает сетку параметров, возвращает лучшие STAT, TEAM_VAR, TAU и RMSE."""
+    """Iterate over parameter grid to find best weights and tau by minimizing RMSE."""
     if param_grid is None:
         param_grid = {
             'STAT_CONTRIBUTION_WEIGHT': [0.05, 0.1, 0.2, 0.3],
@@ -47,18 +47,18 @@ def calibrate_parameters(match_history, param_grid=None):
     best_rmse = float('inf')
     param_names = list(param_grid.keys())
 
-    # Предвычисление матчей
+    # Precompute match data
     prep = []
     for match in match_history:
         teams = match['teams']
         ranks = match['ranks']
         stats = match.get('stats', None)
         importance = match.get('importance', 1.0)
-        # Сериализация команд
+        # Serialize team data
         team_dicts = [[p.to_dict() for p in team] for team in teams]
         prep.append((team_dicts, ranks, stats, importance, match.get('real_result', 0)))
 
-    # Перебор комбинаций
+    # Iterate over all parameter combinations
     for combo in itertools.product(*[param_grid[n] for n in param_names]):
         params = dict(zip(param_names, combo))
         set_calibration_params(params['STAT_CONTRIBUTION_WEIGHT'],
@@ -68,7 +68,7 @@ def calibrate_parameters(match_history, param_grid=None):
         preds = []
         reals = []
         for team_dicts, ranks, stats, importance, real in prep:
-            # Десериализация для обновления
+            # Deserialize teams for rating update
             teams = [GTFTeam([GTFPlayer.from_dict(d) for d in team]) for team in team_dicts]
             system.update_ratings(teams, ranks, stats=stats, stat_weights=None, match_importance=importance)
             if len(teams) == 2:

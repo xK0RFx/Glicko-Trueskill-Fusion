@@ -7,9 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 def save_players_to_json(players, path):
-    """Сохраняет список игроков (GTFPlayer) в JSON-файл."""
+    """Save players (GTFPlayer) list to a JSON file."""
     try:
-        # Преобразуем объекты в словари
+        # Convert player objects to dictionaries
         player_dicts = [p.to_dict() if isinstance(p, GTFPlayer) else p for p in players]
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(player_dicts, f, ensure_ascii=False, indent=2)
@@ -19,7 +19,7 @@ def save_players_to_json(players, path):
 
 
 def load_players_from_json(path):
-    """Загружает список игроков из JSON-файла и возвращает список GTFPlayer."""
+    """Load players from a JSON file and return a list of GTFPlayer."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -35,7 +35,7 @@ def load_players_from_json(path):
 
 
 def export_history(players, path):
-    """Экспортирует историю всех игроков в JSON-файл {имя: история}."""
+    """Export history of all players to a JSON file mapping name to history."""
     try:
         history = {p.name: p.history for p in players}
         with open(path, 'w', encoding='utf-8') as f:

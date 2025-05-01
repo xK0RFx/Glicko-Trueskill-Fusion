@@ -5,48 +5,44 @@ from src.config import CONVERGENCE_TOLERANCE, get_current_tau # Use getter for p
 
 logger = logging.getLogger(__name__)
 
+# Cache math functions and constants for performance
+_sqrt = math.sqrt
+_exp = math.exp
+_pi_sq = math.pi * math.pi
+
 # --- Glicko-2 Core Mathematical Functions ---
 
 def _g(phi):
     """The g function in Glicko-2, mapping RD to a scaling factor."""
-    return 1 / math.sqrt(1 + 3 * (phi**2) / (math.pi**2))
+    return 1.0 / _sqrt(1.0 + 3.0 * phi * phi / _pi_sq)
 
 def _E(mu, mu_opponent, phi_opponent):
     """The E function, calculating expected score against an opponent."""
     g_val = _g(phi_opponent)
-    try:
-        exponent = -g_val * (mu - mu_opponent)
-        # Prevent overflow in exp
-        if exponent > 700: return 1e-12 # Effectively 0
-        if exponent < -700: return 1.0 - 1e-12 # Effectively 1
-        return 1 / (1 + math.exp(exponent))
-    except OverflowError:
-        # If exponent is extremely large negative, result is 1. Extremely large positive, result is 0.
-        return 1.0 if exponent < 0 else 1e-12
+    exponent = -g_val * (mu - mu_opponent)
+    # Prevent exponent overflow
+    if exponent > 700.0:
+        return 1e-12
+    if exponent < -700.0:
+        return 1.0 - 1e-12
+    return 1.0 / (1.0 + _exp(exponent))
 
 def _v(mu, mu_opponent, phi_opponent):
     """The v function, estimating variance of the match outcome."""
     g_val = _g(phi_opponent)
     E_val = _E(mu, mu_opponent, phi_opponent)
-    # Avoid division by zero or near-zero if E is very close to 0 or 1
+    # Avoid extreme E values to prevent division by zero
     if E_val < 1e-9 or E_val > 1.0 - 1e-9:
-        # Return a very small variance (high certainty) equivalent
-        # This corresponds to a large inverse variance, effectively infinity in limits
-        # Using a large number avoids numerical issues later.
-        # The original paper doesn't explicitly state this handling, but it's practical.
-        return 1e-12 # Represents near-infinite v_inv
-
-    v_inv = (g_val**2) * E_val * (1 - E_val)
-    if abs(v_inv) < 1e-12: # Avoid division by zero if v_inv is tiny
-        return 1e12 # Effectively infinite v
-    return 1 / v_inv
+        return 1e-12
+    v_inv = g_val * g_val * E_val * (1.0 - E_val)
+    if v_inv == 0.0:
+        return 1e12
+    return 1.0 / v_inv
 
 def _delta(mu, mu_opponent, phi_opponent, v, outcome):
     """The delta function, calculating the change in rating based on outcome."""
-    g_val = _g(phi_opponent)
-    E_val = _E(mu, mu_opponent, phi_opponent)
-    # No need to cap v here, _v handles extreme E values leading to extreme v_inv
-    return v * g_val * (outcome - E_val)
+    # Compute rating change delta
+    return v * _g(phi_opponent) * (outcome - _E(mu, mu_opponent, phi_opponent))
 
 def _compute_new_volatility(phi, v, delta, sigma, tau=None):
     """Computes the new volatility (sigma') using the Illinois algorithm (Regula Falsi)."""
@@ -69,7 +65,7 @@ def _compute_new_volatility(phi, v, delta, sigma, tau=None):
 
     # Internal function for the iterative algorithm
     def f(x):
-        exp_x = math.exp(x)
+        exp_x = _exp(x)
         term_A = phi_sq + v + exp_x
         # Avoid division by zero in the denominator
         if abs(term_A) < 1e-12:
